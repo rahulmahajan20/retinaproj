@@ -1,21 +1,64 @@
+
 import torch.nn as nn
 import math
 import torch.utils.model_zoo as model_zoo
 
-
 __all__ = ['resnet50']
-
-
-model_urls = {
-    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-}
-
 
 def conv3x3(in_planes, out_planes, stride=1):
     "3x3 convolution with padding"
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=1, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
+class ChannelAttention(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(in_channels, in_channels // reduction_ratio),
+            nn.ReLU(),
+            nn.Linear(in_channels // reduction_ratio, in_channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        avg_out = self.avg_pool(x).view(x.size(0), -1)
+        channel_weight = self.fc(avg_out).view(x.size(0), -1, 1, 1)
+        return x * channel_weight
+
+class SpatialAttention(nn.Module):
+    def __init__(self):
+        super(SpatialAttention, self).__init__()
+        self.localization = nn.Sequential(
+            nn.Conv2d(2048, 8, kernel_size=7),
+            nn.MaxPool2d(2, stride=2),
+            nn.ReLU(True),
+            nn.Conv2d(8, 10, kernel_size=5),
+            nn.MaxPool2d(2, stride=2),
+            nn.ReLU(True)
+        )
+
+        self.fc_loc = nn.Sequential(
+            nn.Linear(10 * 3 * 3, 32),
+            nn.ReLU(True),
+            nn.Linear(32, 3 * 2)
+        )
+
+        self.fc_loc[2].weight.data.fill_(0)
+        self.fc_loc[2].bias.data = torch.FloatTensor([1, 0, 0, 0, 1, 0])
+
+    def stn(self, x):
+        xs = self.localization(x)
+        xs = xs.view(-1, 10 * 3 * 3)
+        theta = self.fc_loc(xs).view(-1, 2, 3)
+
+        grid = nn.functional.affine_grid(theta, x.size())
+        x = nn.functional.grid_sample(x, grid)
+
+        return x
+
+    def forward(self, x):
+        x = self.stn(x)
+        return x
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -47,7 +90,6 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
 
         return out
-
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -87,7 +129,6 @@ class Bottleneck(nn.Module):
 
         return out
 
-
 class ResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000):
@@ -97,11 +138,14 @@ class ResNet(nn.Module):
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
-        #self.maxpool = nn.MaxPool2d(kernel_size=3, stride=1, padding=1) # previous stride is 2
+
+        self.ca = ChannelAttention(64)  # Channel Attention
+        self.sa = SpatialAttention()    # Spatial Attention
         self.layer1 = self._make_layer(block, 64, layers[0])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+
         self.avgpool = nn.AvgPool2d(14)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -110,8 +154,6 @@ class ResNet(nn.Module):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
                 m.weight.data.normal_(0, math.sqrt(2. / n))
             elif isinstance(m, nn.BatchNorm2d):
-                #m.weight.data.fill_(1)
-                #m.bias.data.zero_()
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
@@ -136,7 +178,9 @@ class ResNet(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        #x = self.maxpool(x)
+
+        x = self.ca(x)  # Apply Channel Attention
+        x = self.sa(x)  # Apply Spatial Attention
 
         x = self.layer1(x)
         x = self.layer2(x)
@@ -149,12 +193,8 @@ class ResNet(nn.Module):
 
         return x
 
-
 def resnet50(pretrained=False, **kwargs):
-
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet50']))
     return model
-
-
