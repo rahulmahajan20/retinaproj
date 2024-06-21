@@ -12,9 +12,6 @@ arch = 'resnet50'
 
 # load the pre-trained weights
 model_file = '%s_places365.pth.tar' % arch
-if not os.access(model_file, os.W_OK):
-    weight_url = 'http://places2.csail.mit.edu/models_places365/' + model_file
-    os.system('wget ' + weight_url)
 
 model = models.__dict__[arch](num_classes=365)
 checkpoint = torch.load(model_file, map_location=lambda storage, loc: storage)
